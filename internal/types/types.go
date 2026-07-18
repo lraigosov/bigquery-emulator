@@ -195,13 +195,8 @@ func (c *TableCell) AppendValueToARROWBuilder(builder array.Builder) error {
 		if !ok {
 			return fmt.Errorf("failed to convert to list builder from %T", builder)
 		}
-		// BigQuery REPEATED fields are always non-null: a REPEATED column is
-		// either empty or populated, never null. Append(true) marks this list
-		// slot as valid (non-null) and opens it for elements. The slot is closed
-		// implicitly when Append is next called (for the following row). A nil
-		// []*TableCell is therefore treated identically to an empty slice.
-		// The original bug (issue #399) placed this call inside the element
-		// loop, opening N slots instead of 1 and causing a NewRecord panic.
+		// A BigQuery REPEATED field is a single non-null list slot per row.
+		// Append once before writing its elements; nil behaves as an empty list.
 		listBuilder.Append(true)
 		b := listBuilder.ValueBuilder()
 		for _, vv := range v {
@@ -233,19 +228,82 @@ func Format(schema *bigqueryv2.TableSchema, rows []*TableRow, useInt64Timestamp 
 	for _, row := range rows {
 		cells := make([]*TableCell, 0, len(row.F))
 		for colIdx, cell := range row.F {
-			if schema.Fields[colIdx].Type == "TIMESTAMP" && cell.V != nil {
-				cells = append(cells, &TableCell{
-					V: formatTimestampCell(cell.V, useInt64Timestamp),
-				})
-			} else {
-				cells = append(cells, cell)
-			}
+			cells = append(cells, formatCell(schema.Fields[colIdx], cell, useInt64Timestamp))
 		}
 		formattedRows = append(formattedRows, &TableRow{
 			F: cells,
 		})
 	}
 	return formattedRows
+}
+
+func formatCell(field *bigqueryv2.TableFieldSchema, cell *TableCell, useInt64Timestamp bool) *TableCell {
+	if cell.V == nil {
+		return cell
+	}
+	if field == nil {
+		return cell
+	}
+
+	if field.Mode == "REPEATED" {
+		if cells, ok := cell.V.([]*TableCell); ok {
+			elemField := *field
+			elemField.Mode = "NULLABLE"
+			formattedCells := make([]*TableCell, 0, len(cells))
+			for _, c := range cells {
+				formattedCells = append(formattedCells, formatCell(&elemField, c, useInt64Timestamp))
+			}
+			return &TableCell{
+				V:     formattedCells,
+				Bytes: cell.Bytes,
+				Name:  cell.Name,
+			}
+		}
+	}
+
+	if field.Type == "RECORD" {
+		switch row := cell.V.(type) {
+		case TableRow:
+			formattedRow := formatRecordRow(field, &row, useInt64Timestamp)
+			return &TableCell{
+				V:     *formattedRow,
+				Bytes: cell.Bytes,
+				Name:  cell.Name,
+			}
+		case *TableRow:
+			if row == nil {
+				return cell
+			}
+			formattedRow := formatRecordRow(field, row, useInt64Timestamp)
+			return &TableCell{
+				V:     formattedRow,
+				Bytes: cell.Bytes,
+				Name:  cell.Name,
+			}
+		}
+	}
+
+	if field.Type == "TIMESTAMP" {
+		return &TableCell{
+			V:     formatTimestampCell(cell.V, useInt64Timestamp),
+			Bytes: cell.Bytes,
+			Name:  cell.Name,
+		}
+	}
+
+	return cell
+}
+
+func formatRecordRow(field *bigqueryv2.TableFieldSchema, row *TableRow, useInt64Timestamp bool) *TableRow {
+	formattedF := make([]*TableCell, 0, len(row.F))
+	for i, c := range row.F {
+		var nestedField *bigqueryv2.TableFieldSchema
+		if i < len(field.Fields) {
+			nestedField = field.Fields[i]
+		}
+		formattedF = append(formattedF, formatCell(nestedField, c, useInt64Timestamp))
+	}
+	return &TableRow{F: formattedF}
 }
 
 // formatTimestampCell renders one TIMESTAMP cell value. A non-string value or
