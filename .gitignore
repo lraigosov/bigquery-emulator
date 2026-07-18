@@ -21,6 +21,10 @@ dist
 # Local output of the e2e conformance suite
 /test/e2e/.out/
 
+# Maven build output from the Java e2e client
+/test/e2e/clients/java/target/
+/test/e2e/clients/java/dependency-reduced-pom.xml
+
 # Local reproduction scripts and logs
 /repro/
 
