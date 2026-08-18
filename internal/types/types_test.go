@@ -96,3 +96,46 @@ func TestFormatCellRecordPointerFormatsNestedTimestamp(t *testing.T) {
 		t.Fatalf("nested timestamp = %v, want %v", gotRow.F[0].V, want)
 	}
 }
+
+func TestFormatCellRepeatedRecordUnquotesNestedDate(t *testing.T) {
+	field := &bigqueryv2.TableFieldSchema{
+		Type: "RECORD",
+		Mode: "REPEATED",
+		Fields: []*bigqueryv2.TableFieldSchema{
+			{Name: "name", Type: "STRING"},
+			{Name: "nested_date", Type: "DATE"},
+		},
+	}
+	elemRow := &TableRow{
+		F: []*TableCell{
+			{V: "b"},
+			{V: `"2025-03-29"`},
+		},
+	}
+	cell := &TableCell{V: []*TableCell{{V: elemRow}}}
+
+	got := formatCell(field, cell, true)
+	cells, ok := got.V.([]*TableCell)
+	if !ok || len(cells) != 1 {
+		t.Fatalf("got.V = %#v, want a single-element []*TableCell", got.V)
+	}
+	gotRow, ok := cells[0].V.(*TableRow)
+	if !ok {
+		t.Fatalf("cells[0].V type = %T, want *TableRow", cells[0].V)
+	}
+	if want := "2025-03-29"; gotRow.F[1].V != want {
+		t.Fatalf("nested date = %#v, want %q", gotRow.F[1].V, want)
+	}
+}
+
+func TestFormatDateCellPassesThroughBareDate(t *testing.T) {
+	if got := formatDateCell("2025-03-29"); got != "2025-03-29" {
+		t.Fatalf("formatDateCell(bare date) = %#v, want unchanged", got)
+	}
+}
+
+func TestFormatDateCellPassesThroughUnparseableValue(t *testing.T) {
+	if got := formatDateCell(`"not-a-date"`); got != `"not-a-date"` {
+		t.Fatalf("formatDateCell(unparseable) = %#v, want unchanged", got)
+	}
+}
