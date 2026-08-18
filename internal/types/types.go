@@ -2,6 +2,7 @@ package types
 
 import (
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -22,12 +23,12 @@ type (
 	}
 
 	QueryResponse struct {
-		JobReference   *bigqueryv2.JobReference   `json:"jobReference"`
-		Schema         *bigqueryv2.TableSchema    `json:"schema"`
-		Rows           []*TableRow                `json:"rows"`
-		TotalRows      uint64                     `json:"totalRows,string"`
-		JobComplete    bool                       `json:"jobComplete"`
-		TotalBytes     int64                      `json:"-"`
+		JobReference   *bigqueryv2.JobReference     `json:"jobReference"`
+		Schema         *bigqueryv2.TableSchema      `json:"schema"`
+		Rows           []*TableRow                  `json:"rows"`
+		TotalRows      uint64                       `json:"totalRows,string"`
+		JobComplete    bool                         `json:"jobComplete"`
+		TotalBytes     int64                        `json:"-"`
 		ChangedCatalog *googlesqlite.ChangedCatalog `json:"-"`
 	}
 
@@ -195,9 +196,11 @@ func (c *TableCell) AppendValueToARROWBuilder(builder array.Builder) error {
 		if !ok {
 			return fmt.Errorf("failed to convert to list builder from %T", builder)
 		}
+		// A BigQuery REPEATED field is a single non-null list slot per row.
+		// Append once before writing its elements; nil behaves as an empty list.
+		listBuilder.Append(true)
 		b := listBuilder.ValueBuilder()
 		for _, vv := range v {
-			listBuilder.Append(true)
 			if err := vv.AppendValueToARROWBuilder(b); err != nil {
 				return err
 			}
@@ -289,6 +292,14 @@ func formatCell(field *bigqueryv2.TableFieldSchema, cell *TableCell, useInt64Tim
 		}
 	}
 
+	if field.Type == "DATE" {
+		return &TableCell{
+			V:     formatDateCell(cell.V),
+			Bytes: cell.Bytes,
+			Name:  cell.Name,
+		}
+	}
+
 	return cell
 }
 
@@ -326,4 +337,25 @@ func formatTimestampCell(v interface{}, useInt64Timestamp bool) interface{} {
 		sec--
 	}
 	return fmt.Sprintf("%d.%06d", sec, frac)
+}
+
+// formatDateCell renders one DATE cell value. Inside a REPEATED RECORD the
+// raw value can arrive JSON-quoted (e.g. the literal string `"2025-03-29"`,
+// quote characters included) instead of the bare "2025-03-29" BigQuery
+// clients expect; unquote it when that's the shape we see. Anything that
+// isn't a quoted string, or doesn't unquote into a valid date, is passed
+// through unchanged.
+func formatDateCell(v interface{}) interface{} {
+	raw, ok := v.(string)
+	if !ok {
+		return v
+	}
+	unquoted, err := strconv.Unquote(raw)
+	if err != nil {
+		return v
+	}
+	if _, err := time.Parse("2006-01-02", unquoted); err != nil {
+		return v
+	}
+	return unquoted
 }
